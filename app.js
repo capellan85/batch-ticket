@@ -276,7 +276,8 @@ function renderCalculator(recipe, batch){
     <div class="row2">
       <div>
         <label>Servings</label>
-        <input type="number" min="0.25" step="0.25" value="${servings}" oninput="setServings(this.value)">
+        <input type="number" min="0.25" step="0.25" inputmode="decimal" value="${servings}"
+               oninput="onServingsInput(this.value)" onblur="onServingsBlur(this.value)">
       </div>
       <div>
         <label>Display unit</label>
@@ -295,21 +296,36 @@ function renderCalculator(recipe, batch){
     </div>
     ${dilutionOn ? `
       <label>Dilution % (typical: 20–25%)</label>
-      <input type="number" min="0" max="100" value="${dilutionPct}" oninput="setDilutionPct(this.value)">
+      <input type="number" min="0" max="100" inputmode="decimal" value="${dilutionPct}"
+             oninput="onDilutionInput(this.value)" onblur="onDilutionBlur(this.value)">
     ` : ''}
-  </div>`;
+  </div>
+  <div id="ticket-slot">${renderTicketHTML(recipe, batch)}</div>`;
 
-  if(batch){
-    out += `<div class="ticket">
-      <div class="ticket-head">${escapeHtml(recipe.name)} — ×${servings}</div>
+  return out;
+}
+
+// The ticket is rendered into its own slot so live inputs (servings, dilution %)
+// can update it WITHOUT re-rendering — and thus destroying — the input the user
+// is typing in.
+function renderTicketHTML(recipe, batch){
+  if(!batch || !recipe) return '';
+  return `<div class="ticket">
+      <div class="ticket-head">${escapeHtml(recipe.name)} — ×${fmt(servings)}</div>
       ${batch.lines.map(l=>`<div class="ticket-line"><span>${escapeHtml(l.name)}<br><span style="color:var(--text-muted);font-size:11px;">${fmt(l.perServing)} ${l.perServingUnit} × ${fmt(servings)}</span></span><span>${fmt(l.amount)} ${l.unit}</span></div>`).join('')}
-      ${dilutionOn ? `<div class="ticket-line water"><span>+ Water (dilution)<br><span style="color:var(--text-muted);font-size:11px;">${dilutionPct}% of ${fmt(batch.volumeTotalDisplay)} ${displayUnit}</span></span><span>${fmt(batch.waterDisplay)} ${displayUnit}</span></div>` : ''}
+      ${dilutionOn ? `<div class="ticket-line water"><span>+ Water (dilution)<br><span style="color:var(--text-muted);font-size:11px;">${fmt(dilutionPct)}% of ${fmt(batch.volumeTotalDisplay)} ${displayUnit}</span></span><span>${fmt(batch.waterDisplay)} ${displayUnit}</span></div>` : ''}
       <div class="ticket-total"><span>Total batch volume</span><span>${fmt(batch.grandTotalDisplay)} ${displayUnit}</span></div>
       <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text-muted);margin-top:10px;padding-top:10px;border-top:1px dotted var(--line);">Per serving after dilution: ${fmt(batch.grandTotalDisplay/servings)} ${displayUnit}</div>
     </div>`;
-  }
+}
 
-  return out;
+// Redraw only the ticket (used by live-typed inputs). No-op if the slot isn't
+// on screen (e.g. Recipes tab).
+function renderTicket(){
+  const slot = document.getElementById('ticket-slot');
+  if(!slot) return;
+  const recipe = getSelectedRecipe();
+  slot.innerHTML = renderTicketHTML(recipe, computeBatch(recipe));
 }
 
 function escapeHtml(s){
@@ -410,10 +426,33 @@ function closeImportModal(){
 // ---- interactions ----
 function setView(v){ view = v; render(); }
 function selectRecipe(id){ selectedRecipeId = id; render(); }
-function setServings(v){ servings = Math.max(0.25, parseFloat(v)||0.25); render(); }
 function setUnit(v){ displayUnit = v; render(); }
 function toggleDilution(){ dilutionOn = !dilutionOn; render(); }
-function setDilutionPct(v){ dilutionPct = Math.min(100, Math.max(0, parseFloat(v)||0)); render(); }
+
+// Servings: update state + ticket on each keystroke (allowing an empty/partial
+// value while typing), then clamp to a valid batch size when the field is left.
+function onServingsInput(v){
+  const n = parseFloat(v);
+  servings = (isNaN(n) || n < 0) ? 0 : n;
+  renderTicket();
+}
+function onServingsBlur(v){
+  const n = parseFloat(v);
+  servings = (isNaN(n) || n < 0.25) ? 0.25 : n;
+  render();
+}
+
+// Dilution %: same pattern — live while typing, clamped on blur.
+function onDilutionInput(v){
+  const n = parseFloat(v);
+  dilutionPct = isNaN(n) ? 0 : Math.min(100, Math.max(0, n));
+  renderTicket();
+}
+function onDilutionBlur(v){
+  const n = parseFloat(v);
+  dilutionPct = isNaN(n) ? 0 : Math.min(100, Math.max(0, n));
+  render();
+}
 
 function deleteRecipe(id){
   recipes = recipes.filter(r=>r.id!==id);
