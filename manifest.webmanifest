@@ -1,0 +1,16 @@
+{
+  "name": "Batch Ticket — Prep Calculator",
+  "short_name": "Batch Ticket",
+  "description": "Scale cocktail recipes for batch prep with dilution math, styled like a bar ticket.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#1C1B1A",
+  "theme_color": "#1C1B1A",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
