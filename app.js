@@ -10,28 +10,125 @@ let displayUnit = 'oz';
 let editingRecipe = null; // object being edited in modal, or null
 let storageError = false;
 
+// auth / cloud state
+let authUser = null;      // {uid,email,name,photo} when signed in, else null
+let bootDone = false;     // has the app rendered its first real state?
+let cloudAvailable = false; // did the Firebase module load and expose window.Cloud?
+let permissionError = false; // last cloud failure was a rules/permission denial
+
 const OZ_TO_ML = 29.5735;
 
 function uid(){ return Math.random().toString(36).slice(2,9); }
 
-function loadRecipes(){
+// ---- local storage helpers ----
+// Guest recipes live under STORAGE_KEY. A signed-in user's recipes are cached
+// under a per-account key so they survive offline and never mix with guest data.
+function guestLoad(){
+  try{ const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : null; }
+  catch(e){ return null; }
+}
+function guestSave(list){
+  try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(list)); return true; }
+  catch(e){ return false; }
+}
+// Per-account cache stores {recipes, dirty}. `dirty` means the local copy has
+// edits that failed to reach the cloud and must be re-pushed on the next load.
+function cacheKey(uidStr){ return STORAGE_KEY + ':' + uidStr; }
+function cacheLoad(uidStr){
   try{
-    const raw = localStorage.getItem(STORAGE_KEY);
-    recipes = raw ? JSON.parse(raw) : defaultRecipes();
-  }catch(e){
-    recipes = defaultRecipes();
+    const raw = localStorage.getItem(cacheKey(uidStr));
+    if(!raw) return null;
+    const o = JSON.parse(raw);
+    if(Array.isArray(o)) return { recipes:o, dirty:false }; // tolerate old format
+    return { recipes: Array.isArray(o.recipes) ? o.recipes : [], dirty: !!o.dirty };
+  }catch(e){ return null; }
+}
+function cacheSave(uidStr, list, dirty){
+  try{ localStorage.setItem(cacheKey(uidStr), JSON.stringify({ recipes:list, dirty:!!dirty })); }catch(e){}
+}
+
+async function loadRecipes(){
+  storageError = false;
+  permissionError = false;
+  if(authUser){
+    const cached = cacheLoad(authUser.uid);
+
+    // If there are un-synced local edits, push them first (last write wins).
+    if(cached && cached.dirty){
+      recipes = cached.recipes;
+      const ok = await pushToCloud();
+      cacheSave(authUser.uid, recipes, !ok);
+      if(!ok) storageError = true;
+      finishLoad();
+      return;
+    }
+
+    let cloud;
+    try{
+      cloud = await window.Cloud.loadRecipes(); // array | null
+    }catch(e){
+      console.error('[cloud] load failed', e);
+      if(e && e.code === 'permission-denied') permissionError = true;
+      recipes = cached ? cached.recipes : [];
+      storageError = true;
+      finishLoad();
+      return;
+    }
+
+    if(cloud === null){
+      // brand-new account: offer to import guest recipes, else seed defaults
+      const guest = guestLoad();
+      if(guest && guest.length){
+        loaded = true;
+        openImportModal(guest);
+        return; // loadRecipes resumes via the import choice
+      }
+      recipes = defaultRecipes();
+      const ok = await pushToCloud();
+      cacheSave(authUser.uid, recipes, !ok);
+      if(!ok) storageError = true;
+    } else {
+      recipes = cloud;
+      cacheSave(authUser.uid, recipes, false);
+    }
+  } else {
+    // guest mode
+    const guest = guestLoad();
+    recipes = guest ? guest : defaultRecipes();
   }
-  if(recipes.length && !selectedRecipeId) selectedRecipeId = recipes[0].id;
+  finishLoad();
+}
+
+function finishLoad(){
+  if(recipes.length && (!selectedRecipeId || !recipes.some(r=>r.id===selectedRecipeId))){
+    selectedRecipeId = recipes[0].id;
+  }
+  if(!recipes.length) selectedRecipeId = null;
   loaded = true;
   render();
 }
 
-function saveRecipes(){
+async function pushToCloud(){
   try{
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(recipes));
-    storageError = false;
+    await window.Cloud.saveRecipes(recipes);
+    return true;
   }catch(e){
-    storageError = true;
+    console.error('[cloud] save failed', e);
+    if(e && e.code === 'permission-denied') permissionError = true;
+    return false;
+  }
+}
+
+async function saveRecipes(){
+  storageError = false;
+  permissionError = false;
+  if(authUser){
+    const ok = await pushToCloud();
+    // On failure, keep a dirty local copy so the edit re-syncs on next load.
+    cacheSave(authUser.uid, recipes, !ok);
+    if(!ok) storageError = true;
+  } else {
+    if(!guestSave(recipes)) storageError = true;
   }
   render();
 }
@@ -116,6 +213,7 @@ function render(){
         <h1>Batch<span>Ticket</span></h1>
         <div class="sub">Prep math, scaled &amp; diluted right</div>
       </div>
+      ${renderAuth()}
     </header>
     <div class="tabs">
       <div class="tab ${view==='calc'?'active':''}" onclick="setView('calc')">Calculator</div>
@@ -124,7 +222,15 @@ function render(){
   `;
 
   if(storageError){
-    html += `<div class="card" style="border-color:var(--danger);color:var(--danger);font-family:'IBM Plex Mono',monospace;font-size:12px;">Couldn't save — changes may not persist. Try again in a moment.</div>`;
+    let msg;
+    if(permissionError){
+      msg = "Can't reach your account yet — the database rules may not be published. Changes are saved on this device for now.";
+    } else if(authUser){
+      msg = "Offline — changes are saved on this device and will sync next time you open the app online.";
+    } else {
+      msg = "Couldn't save — changes may not persist. Try again in a moment.";
+    }
+    html += `<div class="card" style="border-color:var(--danger);color:var(--danger);font-family:'IBM Plex Mono',monospace;font-size:12px;">${msg}</div>`;
   }
 
   if(view === 'recipes'){
@@ -210,6 +316,95 @@ function escapeHtml(s){
   const d = document.createElement('div');
   d.textContent = s;
   return d.innerHTML;
+}
+
+// ---- auth ----
+function renderAuth(){
+  if(authUser){
+    const who = authUser.name || authUser.email || 'Signed in';
+    return `<div class="auth">
+      <div class="auth-who" title="${escapeHtml(authUser.email||'')}">
+        <span class="auth-dot"></span>${escapeHtml(who)}
+      </div>
+      <button class="auth-link" onclick="signOutUser()">Sign out</button>
+    </div>`;
+  }
+  if(cloudAvailable){
+    return `<button class="btn-amber auth-signin" onclick="signIn()">Sign in</button>`;
+  }
+  return ''; // Firebase unavailable (offline / blocked): stay in guest mode silently
+}
+
+async function signIn(){
+  if(!window.Cloud) return;
+  try{
+    await window.Cloud.signIn();
+    // onAuthStateChanged -> cloud-auth-changed handles reload/render
+  }catch(e){
+    const code = e && e.code;
+    if(code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request'){
+      alert('Sign-in failed: ' + ((e && e.message) || code || 'unknown error'));
+    }
+  }
+}
+
+async function signOutUser(){
+  if(!window.Cloud) return;
+  try{ await window.Cloud.signOut(); }catch(e){}
+}
+
+// One-time prompt on first sign-in when the account has no cloud recipes yet.
+function openImportModal(guestRecipes){
+  let bg = document.getElementById('modal-bg');
+  if(!bg){
+    bg = document.createElement('div');
+    bg.id = 'modal-bg';
+    bg.className = 'modal-bg';
+    document.body.appendChild(bg);
+  }
+  const n = guestRecipes.length;
+  bg.innerHTML = `
+    <div class="modal">
+      <h2>Welcome${authUser && authUser.name ? ', ' + escapeHtml(authUser.name.split(' ')[0]) : ''}</h2>
+      <p style="font-family:'Inter',sans-serif;font-size:14px;color:var(--text);margin:0 0 18px;line-height:1.5;">
+        You have <strong>${n}</strong> recipe${n===1?'':'s'} saved on this device.
+        Add ${n===1?'it':'them'} to your account so ${n===1?'it syncs':'they sync'} across your phones?
+      </p>
+      <div class="card-actions">
+        <button class="btn-amber" style="flex:1" onclick="importGuestRecipes()">Add to my account</button>
+        <button class="btn-ghost" onclick="startFreshAccount()">Start fresh</button>
+      </div>
+    </div>`;
+  // stash for the choice handlers
+  window.__pendingImport = guestRecipes;
+}
+
+async function importGuestRecipes(){
+  const guest = window.__pendingImport || [];
+  recipes = JSON.parse(JSON.stringify(guest));
+  window.__pendingImport = null;
+  closeImportModal();
+  storageError = false; permissionError = false;
+  const ok = await pushToCloud();
+  cacheSave(authUser.uid, recipes, !ok);
+  if(!ok) storageError = true;
+  finishLoad();
+}
+
+async function startFreshAccount(){
+  window.__pendingImport = null;
+  recipes = defaultRecipes();
+  closeImportModal();
+  storageError = false; permissionError = false;
+  const ok = await pushToCloud();
+  cacheSave(authUser.uid, recipes, !ok);
+  if(!ok) storageError = true;
+  finishLoad();
+}
+
+function closeImportModal(){
+  const bg = document.getElementById('modal-bg');
+  if(bg) bg.remove();
 }
 
 // ---- interactions ----
@@ -319,4 +514,33 @@ function commitEditor(){
   saveRecipes();
 }
 
-loadRecipes();
+// ---- boot ----
+function applyAuth(detail){
+  authUser = detail;                 // {uid,email,name,photo} or null
+  cloudAvailable = !!window.Cloud;
+  loadRecipes();                     // async; renders when done (or opens import modal)
+}
+
+// Fired once Firebase resolves the initial auth state.
+window.addEventListener('cloud-ready', (e) => {
+  bootDone = true;
+  cloudAvailable = true;
+  applyAuth(e.detail);
+});
+
+// Fired on later sign-in / sign-out.
+window.addEventListener('cloud-auth-changed', (e) => {
+  cloudAvailable = true;
+  selectedRecipeId = null;           // the recipe set changes with the account
+  applyAuth(e.detail);
+});
+
+// Fallback: if Firebase never loads (offline / blocked / CDN down), boot as a
+// guest so the app is always usable.
+setTimeout(() => {
+  if(!bootDone){
+    bootDone = true;
+    cloudAvailable = !!window.Cloud;
+    applyAuth(null);
+  }
+}, 3500);

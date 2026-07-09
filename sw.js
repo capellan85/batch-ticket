@@ -1,12 +1,13 @@
 // Batch Ticket service worker — offline app shell + runtime caching.
 // Bump CACHE_VERSION whenever the shell changes so clients pull updates.
-const CACHE_VERSION = 'batch-ticket-v1';
+const CACHE_VERSION = 'batch-ticket-v2';
 
 const SHELL = [
   './',
   './index.html',
   './styles.css',
   './app.js',
+  './firebase-sync.js',
   './manifest.webmanifest',
   './icon-192.png',
   './icon-512.png',
